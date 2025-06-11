@@ -27,6 +27,16 @@ struct Client{
     std::string  nickname;
     std::set<std::string> joined;
 };
+struct Channel {
+    std::string name;
+    bool invite_only;
+    bool topic_restricted;
+    std::string key;
+    int user_limit;
+    std::set<int> operators;
+    std::set<int> members;
+    std::string topic;
+};
 
 class Server{
     public :
@@ -36,6 +46,5 @@ class Server{
     static const int MAX_CLIENT = 1024;
     static const int LARG_NUMBER = 5000;
     std::vector<Client> clt;
-    std::map<std::string, std::vector<int> > channels;
+    std::map<std::string, Channel> channels;
 };
-

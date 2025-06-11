@@ -20,7 +20,7 @@ void CreateSocket(Server *data, const char *s1, std::string s2){
         sizeof(data->sock->server_addr)), "bind failed");
     check(listen(data->sock->sockfd, 5), "listen failed");
 }
-bool    accept_new(Server *data, int epfd){
+bool    AcceptNew(Server *data, int epfd){
     Client new_clt;
     new_clt.client_len = sizeof(new_clt.client_addr);
     new_clt.client_fd = accept(data->sock->sockfd,
@@ -39,7 +39,7 @@ bool    accept_new(Server *data, int epfd){
     data->clt.push_back(new_clt);
     return true;
 }
-Client *find_client(int fd, Server * data){
+Client *FindClient(int fd, Server * data){
     
     for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it) {
         if (it->client_fd == fd) {
@@ -66,14 +66,19 @@ std::string ParseChannel(std::string joind){
 bool    HandleChannels(std::string joind, Server *data, Client *clt){
     (void)data;
     (void)clt;
-    std::string channel = ParseChannel(joind);
-    if (channel.empty()){
+    Channel ch;
+    ch.name = ParseChannel(joind);
+    if (ch.name.empty()){
         std::cerr << "invalide channel name. Try /join #<channelname>\n";
         return false;
     }
-    clt->joined.insert(channel);
-    data->channels[channel].push_back(clt->client_fd);
-    std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + channel + "\r\n";
+    std::map<std::string, Channel>::iterator it = data->channels.find(ch.name);
+    if(it == data->channels.end())
+        ch.operators.insert(clt->client_fd);
+    ch.members.insert(clt->client_fd);
+    clt->joined.insert(ch.name);
+    data->channels[ch.name] = ch;
+    std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
     send(clt->client_fd, reform.c_str(), reform.length(), 0);
     return true;
 }
@@ -82,8 +87,10 @@ bool    SendToChannel(std::string target, std::string msg, Client *clt, Server *
         return false ;
     std::string reform = ":" + clt->nickname + "!" + clt->username
             + "@localhost PRIVMSG " + target + msg + "\r\n";
-    std::vector<int> &fds = data->channels[target];
-    for (std::vector<int>::iterator it = fds.begin(); it != fds.end(); ++it) {
+
+    Channel &ch = data->channels[target];
+    
+    for (std::set<int>::iterator it = ch.members.begin(); it != ch.members.end(); ++it) {
         int fd = *it;
         if(fd != clt->client_fd)
             send(fd, reform.c_str(), reform.size(), 0);
@@ -128,8 +135,49 @@ bool    HandleDoubleNick(Server *data, std::string new_nick){
     }
     return true;
 }
-bool    handle_buffer(std::string buffer, int fd, Server *data){
-    Client *clt = find_client(fd, data);
+bool    IsOperator(Channel ch, Client *clt){
+    for(std::set<int>::iterator it = ch.operators.begin(); it != ch.operators.end(); ++it){
+        if(*it == clt->client_fd){
+            return true;
+        }
+    }
+    return false;
+}
+bool    KickUserFromChannel(std::string line, Server *data, Client *clt){
+    int pos = line.find(" ", 0), fd;
+    std::string channel = line.substr(0, pos);
+    std::string User = line.substr(pos + 1, line.length() - (pos + 1));
+    Channel &ch = data->channels[channel];
+    if (IsOperator(ch, clt) == false){
+        std::cout << "Permission denied\n";
+        return false;
+    }
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
+        if (it->nickname == User){
+            it->joined.erase(channel);
+            ch.members.erase(it->client_fd);
+            ch.operators.erase(it->client_fd);
+        }
+    }
+    return true;
+}
+bool    InviteUserToChannel(std::string line, Server *data, Client *clt){
+    int pos = line.find(" :", 0);
+    std::string User = line.substr(0, pos);
+    std::string channel = line.substr(pos + 5, line.length() - (pos + 1));
+    Channel &ch = data->channels[channel];
+    if (IsOperator(ch, clt) == false){
+        std::cout << "Permission denied\n";
+        return false;
+    }
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
+        if (it->nickname == User){
+            // send(it->client_fd, );
+        }
+    }
+}
+bool    HandleBuffer(std::string buffer, int fd, Server *data){
+    Client *clt = FindClient(fd, data);
     if (clt == NULL){
         return false;}
     size_t buff_size = buffer.length(), flag = 1, pos = 0, i = 0;
@@ -163,8 +211,8 @@ bool    handle_buffer(std::string buffer, int fd, Server *data){
                 std::string nick_change_msg = ":" + old_nick + "!" + clt->username + "@localhost NICK :" + clt->nickname + "\r\n";
     
                 for (std::set<std::string>::iterator ch = clt->joined.begin(); ch != clt->joined.end(); ++ch) {
-                    std::vector<int> &members = data->channels[*ch];
-                    for (std::vector<int>::iterator it = members.begin(); it != members.end(); ++it) {
+                    Channel &chan = data->channels[*ch];
+                    for (std::set<int>::iterator it = chan.members.begin(); it != chan.members.end(); ++it) {
                         if (*it != clt->client_fd) {
                             send(*it, nick_change_msg.c_str(), nick_change_msg.length(), 0);
                         }
@@ -185,6 +233,14 @@ bool    handle_buffer(std::string buffer, int fd, Server *data){
             std::string msg = line.substr(8, line.length() - 8);
             HandlePrivateMsg(msg, data, clt);
         }
+        if (!line.find("KICK ", 0)){
+            std::string temp = line.substr(5, line.length() - 5);
+            KickUserFromChannel(temp, data, clt);
+        }
+        if (!line.find("INVITE ")){
+            std::string temp = line.substr(7, line.length() - 7);
+            InviteUserToChannel(temp, data, clt);
+        }
         i = pos + 1 + flag;
     }
     return true;
@@ -204,7 +260,7 @@ bool    ClearAfterDisconnection(int client_fd, int epfd, Server *data){
     return true;
 }
 
-bool    recv_new(epoll_event ev, Server *data, int epfd)
+bool    RecvNew(epoll_event ev, Server *data, int epfd)
 {
     char    buffer[Server::LARG_NUMBER];
     int     client_fd = ev.data.fd;
@@ -212,7 +268,7 @@ bool    recv_new(epoll_event ev, Server *data, int epfd)
     if (rd > 0){
         buffer[rd] = '\0';
         std::cout << buffer << std::endl;
-        if (handle_buffer((std::string)buffer, ev.data.fd, data) == false){
+        if (HandleBuffer((std::string)buffer, ev.data.fd, data) == false){
             ClearAfterDisconnection(client_fd, epfd, data);
         }
     }
@@ -248,11 +304,11 @@ int main(int ac, char **av)
         for(int i = 0; i < nfds; ++i){
             if (ev[i].data.fd == data->sock->sockfd)
             {
-                if(accept_new(data, epfd) == false)
+                if(AcceptNew(data, epfd) == false)
                     continue ;
                 
             } else {
-                recv_new(ev[i], data, epfd);
+                RecvNew(ev[i], data, epfd);
             }
         }
     }
