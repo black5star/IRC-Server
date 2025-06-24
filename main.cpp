@@ -1,24 +1,34 @@
 #include "Server.hpp"
 
-void check(int var, std::string message){
+bool check(int var, std::string message){
     if(var < 0){
         std::cerr << message << std::endl;
-        exit(EXIT_FAILURE);
+        return false;
     }
+    return true;
 }
 void CreateSocket(Server *data, const char *s1, std::string s2){
     data->sock->password = (std::string)s2;
     data->sock->port = atoi(s1);
 
     data->sock->sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    check(data->sock->sockfd, "socket failed");
+    if(check(data->sock->sockfd, "socket failed") == false){
+        delete data;
+        exit(EXIT_FAILURE);
+    }
 
     data->sock->server_addr.sin_family = AF_INET;
     data->sock->server_addr.sin_port = htons(data->sock->port);
     data->sock->server_addr.sin_addr.s_addr = INADDR_ANY;
-    check(bind(data->sock->sockfd, (struct sockaddr *)&data->sock->server_addr,
-        sizeof(data->sock->server_addr)), "bind failed");
-    check(listen(data->sock->sockfd, 5), "listen failed");
+    if(check(bind(data->sock->sockfd, (struct sockaddr *)&data->sock->server_addr,
+        sizeof(data->sock->server_addr)), "bind failed") == false){
+        delete data;
+        exit(EXIT_FAILURE);
+    }
+    if(check(listen(data->sock->sockfd, 5), "listen failed") == false){
+        delete data;
+        exit(EXIT_FAILURE);
+    }
 }
 bool    AcceptNew(Server *data, int epfd){
     Client new_clt;
@@ -63,9 +73,23 @@ std::string ParseChannel(std::string joind){
     channel = joind.substr(0, pos2);
     return channel;
 }
+bool    CheckJoinningPermission(Channel &chan, Client *clt){
+    if (chan.invite_only){
+        for(std::set<int>::iterator it = chan.invited.begin(); it != chan.invited.end(); ++it){
+            if (*it == clt->client_fd){
+                return true;
+            }
+        }
+        return false;
+    }
+    if (chan.user_limit != -1){
+        if ((int)chan.members.size() >= chan.user_limit){
+            return false;
+        }
+    }
+    return true;
+}
 bool    HandleChannels(std::string joind, Server *data, Client *clt){
-    (void)data;
-    (void)clt;
     Channel ch;
     ch.name = ParseChannel(joind);
     if (ch.name.empty()){
@@ -73,13 +97,26 @@ bool    HandleChannels(std::string joind, Server *data, Client *clt){
         return false;
     }
     std::map<std::string, Channel>::iterator it = data->channels.find(ch.name);
-    if(it == data->channels.end())
+    if(it == data->channels.end()){
         ch.operators.insert(clt->client_fd);
-    ch.members.insert(clt->client_fd);
-    clt->joined.insert(ch.name);
-    data->channels[ch.name] = ch;
-    std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
-    send(clt->client_fd, reform.c_str(), reform.length(), 0);
+        ch.members.insert(clt->client_fd);
+        clt->joined.insert(ch.name);
+        data->channels.insert(std::pair<std::string, Channel>(ch.name, ch));
+        std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
+        send(clt->client_fd, reform.c_str(), reform.length(), 0);
+    }else if(CheckJoinningPermission(it->second, clt) == false){
+        std::cout << "permission denied\n";
+        return false;
+    }
+    else{
+        Channel &chan = it->second;
+        chan.members.insert(clt->client_fd);
+        clt->joined.insert(ch.name);
+        for (std::set<int>::iterator it = chan.members.begin(); it != chan.members.end(); ++it) {
+            std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
+            send(*it, reform.c_str(), reform.length(), 0);
+        }
+    }
     return true;
 }
 bool    SendToChannel(std::string target, std::string msg, Client *clt, Server *data){
@@ -88,8 +125,7 @@ bool    SendToChannel(std::string target, std::string msg, Client *clt, Server *
     std::string reform = ":" + clt->nickname + "!" + clt->username
             + "@localhost PRIVMSG " + target + msg + "\r\n";
 
-    Channel &ch = data->channels[target];
-    
+    Channel &ch = data->channels[target]; 
     for (std::set<int>::iterator it = ch.members.begin(); it != ch.members.end(); ++it) {
         int fd = *it;
         if(fd != clt->client_fd)
@@ -101,6 +137,8 @@ bool    SendToUser(std::string target, std::string msg, Client *clt, Server *dat
     for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it) {
         if (it->nickname == target) {
             Client *receiver = &(*it);
+            if (receiver->client_fd == clt->client_fd)
+                return true;
             std::string reform = ":" + clt->nickname + "!" + clt->username
                 + "@localhost PRIVMSG " + target + msg + "\r\n";
             send(receiver->client_fd, reform.c_str(), reform.length(), 0);
@@ -143,39 +181,314 @@ bool    IsOperator(Channel ch, Client *clt){
     }
     return false;
 }
+void    RejectAndInform(int fd, Channel &ch, std::string msg){
+    ch.members.erase(fd);
+    ch.operators.erase(fd);
+    ch.invited.erase(fd);
+    for (std::set<int>::iterator it = ch.members.begin(); it != ch.members.end(); ++it){
+        send(*it, msg.c_str(), msg.length(), 0);
+    }
+
+}
 bool    KickUserFromChannel(std::string line, Server *data, Client *clt){
-    int pos = line.find(" ", 0), fd;
-    std::string channel = line.substr(0, pos);
-    std::string User = line.substr(pos + 1, line.length() - (pos + 1));
-    Channel &ch = data->channels[channel];
+    size_t pos = line.find(" ", 0);
+    std::string channel = line.substr(0, pos), User, reason = "", msg;
+    line = line.substr(pos + 1, line.length() - (pos + 1));
+    pos = line.find(" ", 0);
+    if (pos == std::string::npos){
+        User = line;
+    }else{
+        User = line.substr(0, pos);
+        reason = line.substr(pos + 1, line.length() - (pos + 1));
+    }
+    std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
+    if(chan == data->channels.end()){
+        std::string err = ":irc.blackstar.ma 403 " + clt->nickname + " " + channel + " :No such channel";
+        send(clt->client_fd, err.c_str(), err.length(), 0);
+        return false;
+    }
+    Channel &ch = chan->second;
     if (IsOperator(ch, clt) == false){
-        std::cout << "Permission denied\n";
+        std::string err = ":irc.blackstar.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
+        send(clt->client_fd, err.c_str(), err.length(), 0);
         return false;
     }
     for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
         if (it->nickname == User){
-            it->joined.erase(channel);
-            ch.members.erase(it->client_fd);
-            ch.operators.erase(it->client_fd);
+            if (it->joined.find(channel) != it->joined.end()){
+                it->joined.erase(channel);
+                msg = ":" + clt->nickname + "!" + clt->username + "@localhost KICK " + ch.name + " " + it->nickname;
+                if (!reason.empty())
+                    msg += " :" + reason;
+                RejectAndInform(it->client_fd, ch, msg + "\r\n");
+                return true;
+            }
         }
+    }
+    std::string err = " :irc.blackstar.ma 441 " + clt->nickname + " " + User + " " + channel + " :They aren't on that channel\r\n";
+    send(clt->client_fd, err.c_str(), err.length(), 0);
+    return false;
+}
+bool    InviteUserToChannel(std::string line, Server *data, Client *clt){
+    size_t pos = line.find(" ", 0);
+    if (pos == std::string::npos){
+        std::cout << "channel name is missing\n";
+        return false;
+    }
+    std::string User = line.substr(0, pos);
+    std::string channel = line.substr(pos + 1, line.length() - (pos + 1));
+    std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
+    if(chan == data->channels.end()){
+        std::string msg = ":irc.blackstar.ma 403 " + clt->nickname + " " + channel + " :No such channel\r\n";
+        send(clt->client_fd, msg.c_str(), msg.length(), 0);
+        return false;
+    }
+    Channel &ch = chan->second;
+    if (IsOperator(ch, clt) == false && ch.invite_only == true){
+        std::string msg = ":irc.blackstar.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
+        send(clt->client_fd, msg.c_str(), msg.length(), 0);
+        return false;
+    }
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
+        if (it->nickname == User){
+            ch.invited.insert(it->client_fd);
+            std::string msg = ":irc.blackstar.ma 341 " + clt->nickname + " " + it->nickname + " " + ch.name + "\r\n";
+            send(clt->client_fd, msg.c_str(), msg.length(), 0);
+            msg = ":" + clt->nickname + "!" + clt->username + "@localhost INVITE " + it->nickname + " :" + ch.name + "\r\n";
+            send(it->client_fd, msg.c_str(), msg.length(), 0);
+            return true;
+        }
+    }
+    std::string msg = ":irc.blackstar.ma 401 " + clt->nickname + " " + User + ":No such nick/channel\r\n";
+    send(clt->client_fd, msg.c_str(), msg.length(), 0);
+    return false;
+}
+bool    GoToDefault(Channel chan, Client *clt){
+    if (IsOperator(chan, clt) == true){
+        chan.invite_only = false;
+        chan.topic_restricted = false;
+        chan.user_limit = -1;
+        std::cout << "\nset modes to default" <<std::endl;
+        return true;
+    }
+    return false;
+}
+bool    TakePrivilege(Channel &chan, Server *data, std::string arg){
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
+        if (it->nickname == arg){
+            chan.operators.erase(it->client_fd);
+            return true;
+        }
+    }
+    return false;
+}
+bool    GivePrivilege(Channel &chan, Server *data, std::string arg){
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
+        if (it->nickname == arg){
+            chan.operators.insert(it->client_fd);
+            return true;
+        }
+    }
+    return false;
+}
+void    BrodcastForMode(Channel &chan, std::string msg){
+    for (std::set<int>::iterator it = chan.members.begin(); it != chan.members.end(); ++it){
+        send(*it, msg.c_str(), msg.length(), 0);
+    }
+}
+std::string SetModes(std::string flag, std::string &str, Channel &chan, Server *data){
+    std::string b_flag, b_args = "", arg;
+    size_t pos;
+    b_flag = "+";
+    for (size_t i = 1; i < flag.length(); ++i){
+        if (flag[i] == 'i'){
+            chan.invite_only = true;
+            b_flag = b_flag + "i";
+        }
+        if (flag[i] == 't'){
+            chan.topic_restricted = true;
+            b_flag = b_flag + "t";
+        }
+        if (flag[i] == 'l' || flag[i] == 'o' || flag[i] == 'k'){
+            if (str.empty())
+                break ;
+            pos = str.find(" ", 0);
+            if (pos == std::string::npos){
+                arg = str;
+            } else {
+                arg = str.substr(0, pos);
+                str = str.substr(pos + 1, str.length() - (pos + 1));
+            }
+            if (flag[i] == 'l'){
+                chan.user_limit = atoi(arg.c_str());
+                b_flag = b_flag + "l";
+                if (!b_args.empty()){
+                    b_args += " ";
+                }
+                b_args = b_args + arg;
+            }
+            if (flag[i] == 'o'){
+                GivePrivilege(chan, data, arg);
+                b_flag = b_flag + "o";
+                if (!b_args.empty()){
+                    b_args += " ";
+                }
+                b_args = b_args + arg;
+            }
+            if (flag[i] == 'k'){
+                chan.key = arg;
+                b_flag = b_flag + "k";
+                if (!b_args.empty()){
+                    b_args += " ";
+                }
+                b_args = b_args + arg;
+            }
+        }
+    }
+    return (b_flag + " " + b_args);
+}
+std::string RemoveMode(std::string flag, std::string &str, Channel &chan, Server *data){
+    std::string b_flag, b_args = "", arg;
+    size_t pos;
+    b_flag = "-";
+    std::cout << "set modes " << flag << std::endl;
+    for (size_t i = 1; i < flag.length(); ++i){
+        if (flag[i] == 'i'){
+            chan.invite_only = true;
+            b_flag = b_flag + "i";
+        }
+        if (flag[i] == 't'){
+            chan.topic_restricted = true;
+            b_flag = b_flag + "t";
+        }
+        if (flag[i] == 'k'){
+            chan.key = "";
+            b_flag = b_flag + "k";
+        }
+        if (flag[i] == 'l'){
+            chan.user_limit = -1;
+            b_flag = b_flag + "l";
+        }
+        if (flag[i] == 'o'){
+            if (str.empty())
+                break ;
+            pos = str.find(" ", 0);
+            if (pos == std::string::npos){
+                arg = str;
+            } else {
+                arg = str.substr(0, pos);
+                str = str.substr(pos + 1, str.length() - (pos + 1));
+            }
+            if (flag[i] == 'o'){
+                GivePrivilege(chan, data, arg);
+                b_flag = b_flag + "o";
+                if (!b_args.empty()){
+                    b_args += " ";
+                }
+                b_args = b_args + arg;
+            }
+        }
+    }
+    return (b_flag + " " + b_args);
+}
+bool    HandleModes(std::string str, Channel &chan, Client *clt, Server *data)
+{
+    std::string flag, msg = "", format;
+    while (str.length() != 0){
+        size_t pos = str.find(" ", 0);
+        if (pos == std::string::npos){
+            flag = str;
+            str = "";
+        } else {
+            flag = str.substr(0, pos);
+            str = str.substr(pos + 1, str.length() - (pos + 1));
+        }
+        if (flag[0] == '+'){
+            if (!msg.empty()){
+                msg += " ";
+            }
+            msg = msg + SetModes(flag, str, chan, data);
+        } else if (flag[0] == '-'){
+            if (!msg.empty()){
+                msg += " ";
+            }
+            msg = msg + RemoveMode(flag, str, chan, data);
+        }
+    }
+    format = ":" + clt->nickname + "!" + clt->username + "@localhost MODE " + chan.name + " " + msg + "\r\n";
+    BrodcastForMode(chan, format);
+    return true;
+}
+bool    HandleChannelModes(std::string line, Server *data, Client *clt){
+    size_t pos = line.find(" ", 0);
+    std::string ch_name, mode;
+    if(pos == std::string::npos){
+        ch_name = line;
+    }else{
+        ch_name = line.substr(0, pos);
+        mode = line.substr(pos + 1, line.length() - (pos + 1));
+    }
+    std::map<std::string, Channel>::iterator it = data->channels.find(ch_name);
+    if (it == data->channels.end()) {
+        std::cout << "Channel not found\n";
+        return false;
+    }
+    if (it->second.members.size() == 1 && mode.empty()){
+        GoToDefault(it->second, clt);
+        return true;
+    }
+    if (IsOperator(it->second, clt) == true){
+        HandleModes(mode, it->second, clt, data);
+    }else {
+        std::cout << "\nCLIENT IS NOT AN OPERATOR !!\n";
     }
     return true;
 }
-bool    InviteUserToChannel(std::string line, Server *data, Client *clt){
-    int pos = line.find(" :", 0);
-    std::string User = line.substr(0, pos);
-    std::string channel = line.substr(pos + 5, line.length() - (pos + 1));
-    Channel &ch = data->channels[channel];
-    if (IsOperator(ch, clt) == false){
-        std::cout << "Permission denied\n";
+bool    ViewTopic(Channel chan, Client *clt){
+    std::string format;
+    if (chan.topic.empty()){
+        format = ":irc.blackstar.ma 331 " + clt->nickname + " " + chan.name + " :No topic is set\r\n";
+        send(clt->client_fd, format.c_str(), format.length(), 0);
+        return true;
+    }
+    format = ":irc.blackstar.ma 332 " + clt->nickname + " " + chan.name + " :" + chan.topic + "\r\n";
+    send(clt->client_fd, format.c_str(), format.length(), 0);
+    return true;
+}
+bool    SetTopic(std::string topic, Channel &chan, Client *clt){
+    if (IsOperator(chan, clt) == false && chan.topic_restricted == true){
+        std::string msg = ":irc.blackstar.ma 482 " + clt->nickname + " " + chan.name + " :You're not channel operator\r\n";
         return false;
     }
-    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
-        if (it->nickname == User){
-            // send(it->client_fd, );
-        }
+    chan.topic = topic;
+    std::string format = ":" + clt->nickname + "!" + clt->username + "@localhost TOPIC " + chan.name + " :" + chan.topic + "\r\n";
+    for(std::set<int>::iterator it = chan.members.begin(); it != chan.members.end(); ++it){
+        send(*it, format.c_str(), format.length(), 0);
     }
+    return true;
 }
+bool    HandleTopic(std::string str, Client *clt, Server *data){
+    size_t pos = str.find(" ", 0);
+    std::string channel;
+    if(pos == std::string::npos){
+        channel = str;
+    }else{
+        channel = str.substr(0, pos);
+        str = str.substr(pos + 1, str.length() - (pos + 1));
+    }
+    std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
+    if (chan == data->channels.end()){
+        std::cout << "channel not found\n";
+        return false;
+    }
+    if (str.empty()){
+        ViewTopic(chan->second, clt);
+    }else{
+        SetTopic(str, chan->second, clt);
+    }
+    return true;
+}
+
 bool    HandleBuffer(std::string buffer, int fd, Server *data){
     Client *clt = FindClient(fd, data);
     if (clt == NULL){
@@ -210,13 +523,9 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
                 clt->nickname = new_nick;
                 std::string nick_change_msg = ":" + old_nick + "!" + clt->username + "@localhost NICK :" + clt->nickname + "\r\n";
     
-                for (std::set<std::string>::iterator ch = clt->joined.begin(); ch != clt->joined.end(); ++ch) {
-                    Channel &chan = data->channels[*ch];
-                    for (std::set<int>::iterator it = chan.members.begin(); it != chan.members.end(); ++it) {
-                        if (*it != clt->client_fd) {
-                            send(*it, nick_change_msg.c_str(), nick_change_msg.length(), 0);
-                        }
-                    }
+                for (std::vector<Client>::iterator ch = data->clt.begin(); ch != data->clt.end(); ++ch) {
+                    int fd = ch->client_fd;
+                    send(fd, nick_change_msg.c_str(), nick_change_msg.length(), 0);
                 }
             }
         }
@@ -226,8 +535,8 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             clt->username = temp.substr(0, n);
         }
         if (!line.find("JOIN ", 0)){
-            std::string join = line.substr(5, line.length() - 5);
-            HandleChannels(join, data, clt);
+            std::string chan = line.substr(5, line.length() - 5);
+            HandleChannels(chan, data, clt);
         }
         if (!line.find("PRIVMSG ", 0)){
             std::string msg = line.substr(8, line.length() - 8);
@@ -237,10 +546,21 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             std::string temp = line.substr(5, line.length() - 5);
             KickUserFromChannel(temp, data, clt);
         }
+        if (!line.find("MODE ", 0)){
+            std::string temp = line.substr(5,line.length() - 5);
+            HandleChannelModes(temp, data, clt);
+        }
         if (!line.find("INVITE ")){
             std::string temp = line.substr(7, line.length() - 7);
             InviteUserToChannel(temp, data, clt);
         }
+        if (!line.find("TOPIC ", 0)){
+            std::string temp = line.substr(6, line.length() - 6);
+            HandleTopic(temp, clt, data);
+        }
+        // if (!line.find("")){
+
+        // }
         i = pos + 1 + flag;
     }
     return true;
@@ -280,35 +600,53 @@ bool    RecvNew(epoll_event ev, Server *data, int epfd)
     }
     return true;
 }
-
+void    handler(int signal){
+    std::cout << "\nShut down the server\n";
+    if (signal == SIGINT){
+        for (std::vector<Client>::iterator it = g_data->clt.begin(); it != g_data->clt.end(); ++it) {
+            close(it->client_fd);
+        }
+        g_data->clt.clear();
+        g_data->channels.clear();
+        delete g_data;
+        exit(EXIT_SUCCESS);
+    }
+}
 int main(int ac, char **av)
 {
     if (ac != 3){
         std::cerr << "wrong args passed.\n";
         exit(EXIT_FAILURE);
     }
-    struct epoll_event ep;
-
-    int epfd = epoll_create1(0);
-    check(epfd, "epoll_create failed");
     Server *data = new Server;
+    struct epoll_event ep;
+    data->epfd = epoll_create1(0);
+    if(check(data->epfd, "epoll_create failed") == false){
+        delete data;
+        return 1;
+    }
+    g_data = data;
+    signal(SIGINT, handler);
     
     CreateSocket(data, av[1], av[2]);
     ep.events = EPOLLIN;
     ep.data.fd = data->sock->sockfd;
-    check(epoll_ctl(epfd, EPOLL_CTL_ADD, data->sock->sockfd, &ep), "epoll_ctl failed");
+    if(check(epoll_ctl(data->epfd, EPOLL_CTL_ADD, data->sock->sockfd, &ep), "epoll_ctl failed") == false){
+        delete data;
+        return 1;
+    }
     while (true)
     {
         struct epoll_event ev[Server::MAX_CLIENT];
-        int nfds = epoll_wait(epfd, ev, Server::MAX_CLIENT, -1);
+        int nfds = epoll_wait(data->epfd, ev, Server::MAX_CLIENT, -1);
         for(int i = 0; i < nfds; ++i){
             if (ev[i].data.fd == data->sock->sockfd)
             {
-                if(AcceptNew(data, epfd) == false)
+                if(AcceptNew(data, data->epfd) == false)
                     continue ;
                 
             } else {
-                RecvNew(ev[i], data, epfd);
+                RecvNew(ev[i], data, data->epfd);
             }
         }
     }

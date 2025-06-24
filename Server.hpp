@@ -5,12 +5,26 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <vector>
 #include <map>
 #include <set>
 
+int BOT;
+
+struct Bot{
+    int fd;
+    std::string sever_ip;
+    std::string user;
+    std::string nick;
+    std::string pass;
+    std::string channel;
+    short port;
+    struct sockaddr_in bot_addr;
+    socklen_t bot_len;
+};
 
 struct Socket{
     std::string password;
@@ -35,6 +49,7 @@ struct Channel {
     int user_limit;
     std::set<int> operators;
     std::set<int> members;
+    std::set<int> invited;
     std::string topic;
 };
 
@@ -43,8 +58,11 @@ class Server{
     Server();
     ~Server();
     Socket *sock;
+    int epfd;
     static const int MAX_CLIENT = 1024;
     static const int LARG_NUMBER = 5000;
     std::vector<Client> clt;
     std::map<std::string, Channel> channels;
 };
+
+Server *g_data;
