@@ -1,4 +1,5 @@
 #include "Server.hpp"
+Server *g_data;
 
 bool check(int var, std::string message){
     if(var < 0){
@@ -13,6 +14,13 @@ void CreateSocket(Server *data, const char *s1, std::string s2){
 
     data->sock->sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if(check(data->sock->sockfd, "socket failed") == false){
+        delete data;
+        exit(EXIT_FAILURE);
+    }
+
+    int opt = 1;
+    if (setsockopt(data->sock->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        std::cerr << "setsockopt(SO_REUSEADDR) failed" << std::endl;
         delete data;
         exit(EXIT_FAILURE);
     }
@@ -203,13 +211,13 @@ bool    KickUserFromChannel(std::string line, Server *data, Client *clt){
     }
     std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
     if(chan == data->channels.end()){
-        std::string err = ":irc.blackstar.ma 403 " + clt->nickname + " " + channel + " :No such channel";
+        std::string err = ":irc.leet.ma 403 " + clt->nickname + " " + channel + " :No such channel";
         send(clt->client_fd, err.c_str(), err.length(), 0);
         return false;
     }
     Channel &ch = chan->second;
     if (IsOperator(ch, clt) == false){
-        std::string err = ":irc.blackstar.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
+        std::string err = ":irc.leet.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
         send(clt->client_fd, err.c_str(), err.length(), 0);
         return false;
     }
@@ -225,7 +233,7 @@ bool    KickUserFromChannel(std::string line, Server *data, Client *clt){
             }
         }
     }
-    std::string err = " :irc.blackstar.ma 441 " + clt->nickname + " " + User + " " + channel + " :They aren't on that channel\r\n";
+    std::string err = " :irc.leet.ma 441 " + clt->nickname + " " + User + " " + channel + " :They aren't on that channel\r\n";
     send(clt->client_fd, err.c_str(), err.length(), 0);
     return false;
 }
@@ -239,27 +247,27 @@ bool    InviteUserToChannel(std::string line, Server *data, Client *clt){
     std::string channel = line.substr(pos + 1, line.length() - (pos + 1));
     std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
     if(chan == data->channels.end()){
-        std::string msg = ":irc.blackstar.ma 403 " + clt->nickname + " " + channel + " :No such channel\r\n";
+        std::string msg = ":irc.leet.ma 403 " + clt->nickname + " " + channel + " :No such channel\r\n";
         send(clt->client_fd, msg.c_str(), msg.length(), 0);
         return false;
     }
     Channel &ch = chan->second;
     if (IsOperator(ch, clt) == false && ch.invite_only == true){
-        std::string msg = ":irc.blackstar.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
+        std::string msg = ":irc.leet.ma 482 " + clt->nickname + " " + channel + " :You're not channel operator\r\n";
         send(clt->client_fd, msg.c_str(), msg.length(), 0);
         return false;
     }
     for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it){
         if (it->nickname == User){
             ch.invited.insert(it->client_fd);
-            std::string msg = ":irc.blackstar.ma 341 " + clt->nickname + " " + it->nickname + " " + ch.name + "\r\n";
+            std::string msg = ":irc.leet.ma 341 " + clt->nickname + " " + it->nickname + " " + ch.name + "\r\n";
             send(clt->client_fd, msg.c_str(), msg.length(), 0);
             msg = ":" + clt->nickname + "!" + clt->username + "@localhost INVITE " + it->nickname + " :" + ch.name + "\r\n";
             send(it->client_fd, msg.c_str(), msg.length(), 0);
             return true;
         }
     }
-    std::string msg = ":irc.blackstar.ma 401 " + clt->nickname + " " + User + ":No such nick/channel\r\n";
+    std::string msg = ":irc.leet.ma 401 " + clt->nickname + " " + User + ":No such nick/channel\r\n";
     send(clt->client_fd, msg.c_str(), msg.length(), 0);
     return false;
 }
@@ -447,17 +455,17 @@ bool    HandleChannelModes(std::string line, Server *data, Client *clt){
 bool    ViewTopic(Channel chan, Client *clt){
     std::string format;
     if (chan.topic.empty()){
-        format = ":irc.blackstar.ma 331 " + clt->nickname + " " + chan.name + " :No topic is set\r\n";
+        format = ":irc.leet.ma 331 " + clt->nickname + " " + chan.name + " :No topic is set\r\n";
         send(clt->client_fd, format.c_str(), format.length(), 0);
         return true;
     }
-    format = ":irc.blackstar.ma 332 " + clt->nickname + " " + chan.name + " :" + chan.topic + "\r\n";
+    format = ":irc.leet.ma 332 " + clt->nickname + " " + chan.name + " :" + chan.topic + "\r\n";
     send(clt->client_fd, format.c_str(), format.length(), 0);
     return true;
 }
 bool    SetTopic(std::string topic, Channel &chan, Client *clt){
     if (IsOperator(chan, clt) == false && chan.topic_restricted == true){
-        std::string msg = ":irc.blackstar.ma 482 " + clt->nickname + " " + chan.name + " :You're not channel operator\r\n";
+        std::string msg = ":irc.leet.ma 482 " + clt->nickname + " " + chan.name + " :You're not channel operator\r\n";
         return false;
     }
     chan.topic = topic;
@@ -494,10 +502,18 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
     if (clt == NULL){
         return false;}
     size_t buff_size = buffer.length(), flag = 1, pos = 0, i = 0;
-    while(i < buff_size){
+    while(i <= buff_size){
+        if (i == buff_size){
+            clt->buff = "";
+            break ;
+        }
         pos = buffer.find("\r\n", i);
         if (pos == std::string::npos){
             pos = buffer.find("\n", i);
+            if (pos == std::string::npos && buffer.length() > 0){
+                clt->buff = buffer.substr(i, buffer.length() - i);
+                return true;
+            }
             flag = 0;
         }
         std::string line = buffer.substr(i, pos - i);
@@ -558,9 +574,6 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             std::string temp = line.substr(6, line.length() - 6);
             HandleTopic(temp, clt, data);
         }
-        // if (!line.find("")){
-
-        // }
         i = pos + 1 + flag;
     }
     return true;
@@ -582,20 +595,25 @@ bool    ClearAfterDisconnection(int client_fd, int epfd, Server *data){
 
 bool    RecvNew(epoll_event ev, Server *data, int epfd)
 {
-    char    buffer[Server::LARG_NUMBER];
-    int     client_fd = ev.data.fd;
-    int rd = recv(ev.data.fd, buffer, (Server::LARG_NUMBER) - 1, 0);
+    char    buffer[LARG_NUMBER];
+    Client *clt = FindClient(ev.data.fd, data);
+    if(!clt){
+        std::cout << "Client not found \n";
+        return false;
+    }
+    int rd = recv(ev.data.fd, buffer, (LARG_NUMBER) - 1, 0);
+    std::cout << buffer << std::endl;
     if (rd > 0){
         buffer[rd] = '\0';
-        std::cout << buffer << std::endl;
-        if (HandleBuffer((std::string)buffer, ev.data.fd, data) == false){
-            ClearAfterDisconnection(client_fd, epfd, data);
+        std::string msg = clt->buff + (std::string)buffer;
+        if (HandleBuffer(msg, ev.data.fd, data) == false){
+            ClearAfterDisconnection(clt->client_fd, epfd, data);
         }
-    }
-    if (rd == 0) {
+    } else if (rd == 0) {
         std::cout << "\nClient disconnected.\n";
-        ClearAfterDisconnection(client_fd, epfd, data);
-    } else if (rd < 0) {
+        ClearAfterDisconnection(clt->client_fd, epfd, data);
+    } 
+    else if (rd < 0) {
         std::cerr << "recv failed\n";
     }
     return true;
@@ -637,8 +655,8 @@ int main(int ac, char **av)
     }
     while (true)
     {
-        struct epoll_event ev[Server::MAX_CLIENT];
-        int nfds = epoll_wait(data->epfd, ev, Server::MAX_CLIENT, -1);
+        struct epoll_event ev[MAX_CLIENT];
+        int nfds = epoll_wait(data->epfd, ev, MAX_CLIENT, -1);
         for(int i = 0; i < nfds; ++i){
             if (ev[i].data.fd == data->sock->sockfd)
             {
