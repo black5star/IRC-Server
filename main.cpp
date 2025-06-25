@@ -66,22 +66,31 @@ Client *FindClient(int fd, Server * data){
     }
     return NULL;
 }
-std::string ParseChannel(std::string joind){
-    std::string channel;
-    size_t pos = joind.find("#", 0);
+std::pair<std::string, std::string> ParseChannel(std::string joind){
+    std::string channel = "", key = "";
+    std::pair<std::string, std::string> res;
+    res = make_pair(channel, key);
+    size_t pos = joind.find("#", 0), len;
     if (pos){
-        return channel;}
+        return res;}
     size_t pos2 = joind.find(" ", 0);
     if (pos2 == 1)
-        return channel;
-    if (pos2 == std::string::npos){
-        pos2 = joind.length();}
-    if (pos2 > 50){
-        pos2 = 50;}
-    channel = joind.substr(0, pos2);
-    return channel;
+        return res;
+    if (pos2 != std::string::npos){
+        key = joind.substr(pos2 + 1, joind.length() - (pos2 + 1));
+        len = pos2;
+    }else if(pos2 == std::string::npos){
+        len = joind.length();
+    }
+    if (len > 50){
+        len = 50;}
+    channel = joind.substr(0, len);
+    std::cout << "channel name :" << channel << "|\n";
+    std::cout << "key :" << key << "|\n";
+    res = make_pair(channel, key);
+    return res;
 }
-bool    CheckJoinningPermission(Channel &chan, Client *clt){
+bool    CheckJoinningPermission(Channel &chan, std::string &key, Client *clt){
     if (chan.invite_only){
         for(std::set<int>::iterator it = chan.invited.begin(); it != chan.invited.end(); ++it){
             if (*it == clt->client_fd){
@@ -95,11 +104,19 @@ bool    CheckJoinningPermission(Channel &chan, Client *clt){
             return false;
         }
     }
+    if(!chan.key.empty()){
+        if(chan.key != key){
+            std::string err = ":irc.leet.ma 475 " + clt->nickname + " " + chan.name + " :Cannot join channel (+k) - bad key\r\n";
+            send(clt->client_fd, err.c_str(), err.length(), 0);
+            return false;
+        }
+    }
     return true;
 }
 bool    HandleChannels(std::string joind, Server *data, Client *clt){
     Channel ch;
-    ch.name = ParseChannel(joind);
+    std::pair<std::string, std::string> res = ParseChannel(joind);
+    ch.name = res.first;
     if (ch.name.empty()){
         std::cerr << "invalide channel name. Try /join #<channelname>\n";
         return false;
@@ -108,11 +125,12 @@ bool    HandleChannels(std::string joind, Server *data, Client *clt){
     if(it == data->channels.end()){
         ch.operators.insert(clt->client_fd);
         ch.members.insert(clt->client_fd);
+        ch.key = res.second;
         clt->joined.insert(ch.name);
         data->channels.insert(std::pair<std::string, Channel>(ch.name, ch));
         std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
         send(clt->client_fd, reform.c_str(), reform.length(), 0);
-    }else if(CheckJoinningPermission(it->second, clt) == false){
+    }else if(CheckJoinningPermission(it->second, res.second, clt) == false){
         std::cout << "permission denied\n";
         return false;
     }
@@ -540,8 +558,7 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
                 std::string nick_change_msg = ":" + old_nick + "!" + clt->username + "@localhost NICK :" + clt->nickname + "\r\n";
     
                 for (std::vector<Client>::iterator ch = data->clt.begin(); ch != data->clt.end(); ++ch) {
-                    int fd = ch->client_fd;
-                    send(fd, nick_change_msg.c_str(), nick_change_msg.length(), 0);
+                    send(ch->client_fd, nick_change_msg.c_str(), nick_change_msg.length(), 0);
                 }
             }
         }
