@@ -44,6 +44,7 @@ struct Client{
     std::string  username;
     std::string  nickname;
     std::set<std::string> joined;
+    bool        auth;
 };
 struct Channel {
     std::string name;
