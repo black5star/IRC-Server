@@ -71,7 +71,7 @@ std::pair<std::string, std::string> ParseChannel(std::string joind){
     std::string channel = "", key = "";
     std::pair<std::string, std::string> res;
     res = make_pair(channel, key);
-    size_t pos = joind.find("#", 0), len;
+    size_t pos = joind.find("#", 0), len = 0;
     if (pos){
         return res;}
     size_t pos2 = joind.find(" ", 0);
@@ -89,6 +89,7 @@ std::pair<std::string, std::string> ParseChannel(std::string joind){
     res = make_pair(channel, key);
     return res;
 }
+
 bool    CheckJoinningPermission(Channel &chan, std::string &key, Client *clt){
     if (chan.invite_only){
         for(std::set<int>::iterator it = chan.invited.begin(); it != chan.invited.end(); ++it){
@@ -527,6 +528,19 @@ bool    ClearAfterDisconnection(int client_fd, Server *data){
     if (epoll_ctl(data->epfd, EPOLL_CTL_DEL, client_fd, NULL) < 0) {
         return false;
     }
+    for (std::map<std::string, Channel>::iterator it = data->channels.begin(); it != data->channels.end();) {
+        Channel &chan = it->second;
+        chan.members.erase(client_fd);
+        chan.operators.erase(client_fd);
+        chan.invited.erase(client_fd);
+        if (chan.members.empty()){
+            std::map<std::string, Channel>::iterator temp = it;
+            ++it;
+            data->channels.erase(temp);
+        }
+        else
+            ++it;
+    }
     for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it) {
         if (it->client_fd == client_fd) {
             data->clt.erase(it);
@@ -576,7 +590,7 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             std::cout << "\nClient connected.\n";
             clt->auth = true;
         }
-        if (is_auth(clt) && !line.find("NICK ", 0)){
+        if (!line.find("NICK ", 0) && is_auth(clt)){
             std::string new_nick = line.substr(5, line.length() - 5);
             if (HandleDoubleNick(data, new_nick) == false){
                 std::string err_msg = ":irc.leet.ma 433 * " + new_nick + " :Nickname is already in use\r\n";
@@ -598,32 +612,32 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
                 }
             }
         }
-        if (is_auth(clt) && !line.find("USER ", 0)){
+        if (!line.find("USER ", 0) && is_auth(clt)){
             std::string temp = line.substr(5, line.length() - 5);
             int n = temp.find(" ", 0);
             clt->username = temp.substr(0, n);
         }
-        if (is_auth(clt) && !line.find("JOIN ", 0)){
+        if (!line.find("JOIN ", 0) && is_auth(clt)){
             std::string chan = line.substr(5, line.length() - 5);
             HandleChannels(chan, data, clt);
         }
-        if (is_auth(clt) && !line.find("PRIVMSG ", 0)){
+        if (!line.find("PRIVMSG ", 0) && is_auth(clt)){
             std::string msg = line.substr(8, line.length() - 8);
             HandlePrivateMsg(msg, data, clt);
         }
-        if (is_auth(clt) && !line.find("KICK ", 0)){
+        if (!line.find("KICK ", 0) && is_auth(clt)){
             std::string temp = line.substr(5, line.length() - 5);
             KickUserFromChannel(temp, data, clt);
         }
-        if (is_auth(clt) && !line.find("MODE ", 0)){
+        if (!line.find("MODE ", 0) && is_auth(clt)){
             std::string temp = line.substr(5,line.length() - 5);
             HandleChannelModes(temp, data, clt);
         }
-        if (is_auth(clt) && !line.find("INVITE ")){
+        if (!line.find("INVITE ") && is_auth(clt)){
             std::string temp = line.substr(7, line.length() - 7);
             InviteUserToChannel(temp, data, clt);
         }
-        if (is_auth(clt) && !line.find("TOPIC ", 0)){
+        if (!line.find("TOPIC ", 0) && is_auth(clt) ){
             std::string temp = line.substr(6, line.length() - 6);
             HandleTopic(temp, clt, data);
         }
