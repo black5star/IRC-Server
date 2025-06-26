@@ -85,8 +85,6 @@ std::pair<std::string, std::string> ParseChannel(std::string joind){
     if (len > 50){
         len = 50;}
     channel = joind.substr(0, len);
-    std::cout << "channel name :" << channel << "|\n";
-    std::cout << "key :" << key << "|\n";
     res = make_pair(channel, key);
     return res;
 }
@@ -117,20 +115,24 @@ bool    HandleChannels(std::string joind, Server *data, Client *clt){
     Channel ch;
     std::pair<std::string, std::string> res = ParseChannel(joind);
     ch.name = res.first;
+    std::string key = res.second;
     if (ch.name.empty()){
         std::cerr << "invalide channel name. Try /join #<channelname>\n";
         return false;
     }
     std::map<std::string, Channel>::iterator it = data->channels.find(ch.name);
-    if(it == data->channels.end()){
+    if (it == data->channels.end()){
         ch.operators.insert(clt->client_fd);
         ch.members.insert(clt->client_fd);
-        ch.key = res.second;
-        clt->joined.insert(ch.name);
+        ch.key = key;
+        ch.invite_only = false;
+        ch.topic_restricted = false;
+        ch.user_limit = -1;
         data->channels.insert(std::pair<std::string, Channel>(ch.name, ch));
+        clt->joined.insert(ch.name);
         std::string reform = ":" + clt->nickname + "!" + clt->username + "@localhost JOIN :" + ch.name + "\r\n";
         send(clt->client_fd, reform.c_str(), reform.length(), 0);
-    }else if(CheckJoinningPermission(it->second, res.second, clt) == false){
+    }else if(CheckJoinningPermission(it->second, key, clt) == false){
         std::cout << "permission denied\n";
         return false;
     }
@@ -327,11 +329,11 @@ std::string SetModes(std::string flag, std::string &str, Channel &chan, Server *
     size_t pos;
     b_flag = "+";
     for (size_t i = 1; i < flag.length(); ++i){
-        if (flag[i] == 'i'){
+        if (flag[i] == 'i' && (chan.invite_only == false)){
             chan.invite_only = true;
             b_flag = b_flag + "i";
         }
-        if (flag[i] == 't'){
+        if (flag[i] == 't' && (chan.topic_restricted == false)){
             chan.topic_restricted = true;
             b_flag = b_flag + "t";
         }
@@ -354,12 +356,13 @@ std::string SetModes(std::string flag, std::string &str, Channel &chan, Server *
                 b_args = b_args + arg;
             }
             if (flag[i] == 'o'){
-                GivePrivilege(chan, data, arg);
-                b_flag = b_flag + "o";
-                if (!b_args.empty()){
-                    b_args += " ";
+                if (GivePrivilege(chan, data, arg) == true){
+                    b_flag = b_flag + "o";
+                    if (!b_args.empty()){
+                        b_args += " ";
+                    }
+                    b_args = b_args + arg;
                 }
-                b_args = b_args + arg;
             }
             if (flag[i] == 'k'){
                 chan.key = arg;
@@ -377,21 +380,20 @@ std::string RemoveMode(std::string flag, std::string &str, Channel &chan, Server
     std::string b_flag, b_args = "", arg;
     size_t pos;
     b_flag = "-";
-    std::cout << "set modes " << flag << std::endl;
     for (size_t i = 1; i < flag.length(); ++i){
-        if (flag[i] == 'i'){
-            chan.invite_only = true;
+        if (flag[i] == 'i' && (chan.invite_only != false)){
+            chan.invite_only = false;
             b_flag = b_flag + "i";
         }
-        if (flag[i] == 't'){
-            chan.topic_restricted = true;
+        if (flag[i] == 't' && (chan.topic_restricted != false)){
+            chan.topic_restricted = false;
             b_flag = b_flag + "t";
         }
-        if (flag[i] == 'k'){
+        if (flag[i] == 'k' && (chan.key != "")){
             chan.key = "";
             b_flag = b_flag + "k";
         }
-        if (flag[i] == 'l'){
+        if ((flag[i] == 'l') && (chan.user_limit != -1)){
             chan.user_limit = -1;
             b_flag = b_flag + "l";
         }
@@ -406,12 +408,13 @@ std::string RemoveMode(std::string flag, std::string &str, Channel &chan, Server
                 str = str.substr(pos + 1, str.length() - (pos + 1));
             }
             if (flag[i] == 'o'){
-                GivePrivilege(chan, data, arg);
-                b_flag = b_flag + "o";
-                if (!b_args.empty()){
-                    b_args += " ";
+                if (TakePrivilege(chan, data, arg) == true){
+                    b_flag = b_flag + "o";
+                    if (!b_args.empty()){
+                        b_args += " ";
+                    }
+                    b_args = b_args + arg;
                 }
-                b_args = b_args + arg;
             }
         }
     }
@@ -456,7 +459,8 @@ bool    HandleChannelModes(std::string line, Server *data, Client *clt){
     }
     std::map<std::string, Channel>::iterator it = data->channels.find(ch_name);
     if (it == data->channels.end()) {
-        std::cout << "Channel not found\n";
+        std::string err = ":irc.leet.ma 403 " + clt->nickname + " " + ch_name + " :No such channel\r\n";
+        send(clt->client_fd, err.c_str(), err.length(), 0);
         return false;
     }
     if (it->second.members.size() == 1 && mode.empty()){
@@ -465,8 +469,10 @@ bool    HandleChannelModes(std::string line, Server *data, Client *clt){
     }
     if (IsOperator(it->second, clt) == true){
         HandleModes(mode, it->second, clt, data);
-    }else {
-        std::cout << "\nCLIENT IS NOT AN OPERATOR !!\n";
+    }
+    else {
+        std::string err = ":irc.leet.ma 482 " + clt->nickname + " " + ch_name + " :You're not channel operator\r\n";
+        send(clt->client_fd, err.c_str(), err.length(), 0);
     }
     return true;
 }
@@ -504,7 +510,8 @@ bool    HandleTopic(std::string str, Client *clt, Server *data){
     }
     std::map<std::string, Channel>::iterator chan = data->channels.find(channel);
     if (chan == data->channels.end()){
-        std::cout << "channel not found\n";
+        std::string err = ":irc.leet.ma 403 " + clt->nickname + " " + channel + " :No such channel\r\n";
+        send(clt->client_fd, err.c_str(), err.length(), 0);
         return false;
     }
     if (str.empty()){
