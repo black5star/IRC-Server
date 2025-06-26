@@ -38,7 +38,7 @@ void CreateSocket(Server *data, const char *s1, std::string s2){
         exit(EXIT_FAILURE);
     }
 }
-bool    AcceptNew(Server *data, int epfd){
+bool    AcceptNew(Server *data){
     Client new_clt;
     new_clt.client_len = sizeof(new_clt.client_addr);
     new_clt.client_fd = accept(data->sock->sockfd,
@@ -50,7 +50,7 @@ bool    AcceptNew(Server *data, int epfd){
     struct epoll_event clt_ev;
     clt_ev.events = EPOLLIN;
     clt_ev.data.fd = new_clt.client_fd;
-    if(epoll_ctl(epfd, EPOLL_CTL_ADD, new_clt.client_fd, &clt_ev) < 0){
+    if(epoll_ctl(data->epfd, EPOLL_CTL_ADD, new_clt.client_fd, &clt_ev) < 0){
         std::cerr << "epoll_ctl failed\n";
         return false;
     }
@@ -522,6 +522,19 @@ bool    HandleTopic(std::string str, Client *clt, Server *data){
     return true;
 }
 
+bool    ClearAfterDisconnection(int client_fd, Server *data){
+    if (epoll_ctl(data->epfd, EPOLL_CTL_DEL, client_fd, NULL) < 0) {
+        return false;
+    }
+    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it) {
+        if (it->client_fd == client_fd) {
+            data->clt.erase(it);
+            break;
+        }
+    }
+    return true;
+}
+
 bool    HandleBuffer(std::string buffer, int fd, Server *data){
     Client *clt = FindClient(fd, data);
     if (clt == NULL){
@@ -545,16 +558,21 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
         if (!line.find("PASS ", 0)){
             std::string pass = line.substr(5, line.length() - 5);
             if (pass != data->sock->password){
+                std::string err_msg = ":irc.leet.ma 464 * :Password incorrect\r\n";
+                send(clt->client_fd, err_msg.c_str(), err_msg.length(), 0);
                 std::cout << "\nWrong password\n";
-                return false;}
+                ClearAfterDisconnection(clt->client_fd, data);
+                return false;
+            }
             std::cout << "\nClient connected.\n";
         }
         if (!line.find("NICK ", 0)){
             std::string new_nick = line.substr(5, line.length() - 5);
             if (HandleDoubleNick(data, new_nick) == false){
+                std::string err_msg = ":irc.leet.ma 433 * " + new_nick + " :Nickname is already in use\r\n";
+                send(clt->client_fd, err_msg.c_str(), err_msg.length(), 0);
                 if(clt->nickname.empty()){
-                    std::cout << "\nERROR : NickName exist try with other NickName\n";
-                    std::cout << "Client disconnected.\n";
+                    ClearAfterDisconnection(clt->client_fd, data);
                     return false;
                 }
                 std::cout << "\nNickName already exist\n";
@@ -603,21 +621,7 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
     return true;
 }
 
-bool    ClearAfterDisconnection(int client_fd, int epfd, Server *data){
-    if (epoll_ctl(epfd, EPOLL_CTL_DEL, client_fd, NULL) < 0) {
-        std::cerr << "epoll_ctl DEL failed\n";
-        return false;
-    }
-    for (std::vector<Client>::iterator it = data->clt.begin(); it != data->clt.end(); ++it) {
-        if (it->client_fd == client_fd) {
-            data->clt.erase(it);
-            break;
-        }
-    }
-    return true;
-}
-
-bool    RecvNew(epoll_event ev, Server *data, int epfd)
+bool    RecvNew(epoll_event ev, Server *data)
 {
     char    buffer[LARG_NUMBER];
     Client *clt = FindClient(ev.data.fd, data);
@@ -631,11 +635,11 @@ bool    RecvNew(epoll_event ev, Server *data, int epfd)
         buffer[rd] = '\0';
         std::string msg = clt->buff + (std::string)buffer;
         if (HandleBuffer(msg, ev.data.fd, data) == false){
-            ClearAfterDisconnection(clt->client_fd, epfd, data);
+            ClearAfterDisconnection(clt->client_fd, data);
         }
     } else if (rd == 0) {
         std::cout << "\nClient disconnected.\n";
-        ClearAfterDisconnection(clt->client_fd, epfd, data);
+        ClearAfterDisconnection(clt->client_fd, data);
     } 
     else if (rd < 0) {
         std::cerr << "recv failed\n";
@@ -684,11 +688,11 @@ int main(int ac, char **av)
         for(int i = 0; i < nfds; ++i){
             if (ev[i].data.fd == data->sock->sockfd)
             {
-                if(AcceptNew(data, data->epfd) == false)
+                if(AcceptNew(data) == false)
                     continue ;
                 
             } else {
-                RecvNew(ev[i], data, data->epfd);
+                RecvNew(ev[i], data);
             }
         }
     }

@@ -66,3 +66,5 @@ class Server{
     std::vector<Client> clt;
     std::map<std::string, Channel> channels;
 };
+
+
