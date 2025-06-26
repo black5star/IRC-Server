@@ -578,6 +578,7 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             flag = 0;
         }
         std::string line = buffer.substr(i, pos - i);
+        std::cout << line << std::endl;
         if (!line.find("PASS ", 0)){
             std::string pass = line.substr(5, line.length() - 5);
             if (pass != data->sock->password){
@@ -589,8 +590,7 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
             }
             std::cout << "\nClient connected.\n";
             clt->auth = true;
-        }
-        if (!line.find("NICK ", 0) && is_auth(clt)){
+        }else if (!line.find("NICK ", 0) && is_auth(clt)){
             std::string new_nick = line.substr(5, line.length() - 5);
             if (HandleDoubleNick(data, new_nick) == false){
                 std::string err_msg = ":irc.leet.ma 433 * " + new_nick + " :Nickname is already in use\r\n";
@@ -611,35 +611,31 @@ bool    HandleBuffer(std::string buffer, int fd, Server *data){
                     send(ch->client_fd, nick_change_msg.c_str(), nick_change_msg.length(), 0);
                 }
             }
-        }
-        if (!line.find("USER ", 0) && is_auth(clt)){
+        } else if (!line.find("USER ", 0) && is_auth(clt)){
             std::string temp = line.substr(5, line.length() - 5);
             int n = temp.find(" ", 0);
             clt->username = temp.substr(0, n);
-        }
-        if (!line.find("JOIN ", 0) && is_auth(clt)){
+        } else if (!line.find("JOIN ", 0) && is_auth(clt)){
             std::string chan = line.substr(5, line.length() - 5);
             HandleChannels(chan, data, clt);
-        }
-        if (!line.find("PRIVMSG ", 0) && is_auth(clt)){
+        } else if (!line.find("PRIVMSG ", 0) && is_auth(clt)){
             std::string msg = line.substr(8, line.length() - 8);
             HandlePrivateMsg(msg, data, clt);
-        }
-        if (!line.find("KICK ", 0) && is_auth(clt)){
+        }else if (!line.find("KICK ", 0) && is_auth(clt)){
             std::string temp = line.substr(5, line.length() - 5);
             KickUserFromChannel(temp, data, clt);
-        }
-        if (!line.find("MODE ", 0) && is_auth(clt)){
+        } else if (!line.find("MODE ", 0) && is_auth(clt)){
             std::string temp = line.substr(5,line.length() - 5);
             HandleChannelModes(temp, data, clt);
-        }
-        if (!line.find("INVITE ") && is_auth(clt)){
+        } else if (!line.find("INVITE ") && is_auth(clt)){
             std::string temp = line.substr(7, line.length() - 7);
             InviteUserToChannel(temp, data, clt);
-        }
-        if (!line.find("TOPIC ", 0) && is_auth(clt) ){
+        } else if (!line.find("TOPIC ", 0) && is_auth(clt) ){
             std::string temp = line.substr(6, line.length() - 6);
             HandleTopic(temp, clt, data);
+        } else{
+            std::string msg = "Unrecognised command !!\n";
+            send(clt->client_fd, msg.c_str(), msg.length(), 0);
         }
         i = pos + 1 + flag;
     }
@@ -655,7 +651,6 @@ bool    RecvNew(epoll_event ev, Server *data)
         return false;
     }
     int rd = recv(ev.data.fd, buffer, (LARG_NUMBER) - 1, 0);
-    std::cout << buffer << std::endl;
     if (rd > 0){
         buffer[rd] = '\0';
         std::string msg = clt->buff + (std::string)buffer;

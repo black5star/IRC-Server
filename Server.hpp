@@ -15,19 +15,6 @@
 
 #define MAX_CLIENT 1024
 #define LARG_NUMBER 5000
-// int BOT;
-
-// struct Bot{
-//     int fd;
-//     std::string sever_ip;
-//     std::string user;
-//     std::string nick;
-//     std::string pass;
-//     std::string channel;
-//     short port;
-//     struct sockaddr_in bot_addr;
-//     socklen_t bot_len;
-// };
 
 struct Socket{
     std::string password;
